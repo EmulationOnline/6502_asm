@@ -8,6 +8,7 @@
 pub type Binary = Vec<u8>;
 
 enum Operand {
+    None,
     Immediate(u16),
     Absolute(u16),
 }
@@ -22,13 +23,23 @@ enum Line {
 }
 
 impl Line {
-    pub fn asm(&self) -> Vec<u8> {
+    // This function performs the opcode + operand validation and lookup. 
+    pub fn asm(&self) -> Result<Vec<u8>, String> {
         match self {
             Line::None |
-            Line::Label(_) => Vec::new(),
-            Line::Variable(_, _) |
-            Line::Opcode(_, _) => panic!("unimplemented"),
-            Line::Db(v) => v.clone(),
+            Line::Label(_) => Ok(Vec::new()),
+            Line::Variable(_, _) => panic!("unimplemented"),
+            Line::Opcode(op, v) => {
+                match (op, v) {
+                    // TODO: want a table based encode. each opcode has a list
+                    // of supported operand types, and should assemble accordingly.
+                    (x, Operand::None) if x == "brk" => {
+                        Ok(vec![0])
+                    },
+                    _ => Err(format!("unknown opcode {op}")),
+                }
+            }
+            Line::Db(v) => Ok(v.clone()),
         }
     }
 }
@@ -78,6 +89,7 @@ fn tokenize(input: &str) -> Result<Vec<Line>, String> {
                 };
                 Ok(Line::Db(vals))
             }
+            "brk" => Ok(Line::Opcode(parts[0].to_string(), Operand::None)),
             _ => Err(format!("unknown token: {}", parts[0])),
         }
     }
@@ -102,7 +114,7 @@ pub fn assemble(input: &str) -> Result<Binary, String> {
     // Simple 1 pass.
     let mut output = Vec::new();
     for line in tokens {
-        let mut bytes = line.asm();
+        let mut bytes = line.asm()?;
         output.append(&mut bytes);
     }
 
@@ -130,6 +142,13 @@ mod test_asm {
         }
     }
 
+    #[test]
+    fn test_implied_brk() {
+        // break is a simple opcode, no inputs and assembles to 00.
+        assert_eq!(
+            Ok(vec![0]),
+            assemble("BRK"));
+    }
 
     #[test]
     fn test_opcodes() {
