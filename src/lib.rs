@@ -86,7 +86,7 @@ fn encode(name: &str, op: Operand) -> Result<Binary, String> {
         "stx", "ldx", "dec", "inc",
     ];
     const GRP3 : &[&str] = &[ 
-        "bit", "jmp", "jmp", /*jmp abs*/ "sty",
+        "ora"/*fake placeholder for 0*/, "bit", "jmp", "jmp", /*jmp abs*/ "sty",
         "ldy", "cpy", "cpx",
     ];
     const REST : &[(&str, u8)] = &[
@@ -154,11 +154,26 @@ fn encode(name: &str, op: Operand) -> Result<Binary, String> {
         }
     };
 
-    // TODO: handle jump exceptions. add tests.
-
     fn badmode(name: &str, arg: Operand) -> String {
         format!("Unsupported (op, arg) pair ({name}, {arg:?})")
     }
+
+    // jmp instructions dont follow the rule
+    if name == "jmp" {
+        let (opcode, bytes) = match op {
+            Operand::Indirect(x) => {
+                (0x6c, u16b(x))
+            },
+            Operand::Absolute(x) => {
+                (0x4c, u16b(x))
+            },
+            _ => {
+                return Err(badmode(name, op));
+            }
+        };
+        return Ok(vec![opcode, bytes[0], bytes[1]]);
+    }
+
     let (mode, mut arg) = match group {
         // Group 1
         1 => match op {
@@ -194,6 +209,23 @@ fn encode(name: &str, op: Operand) -> Result<Binary, String> {
             _ => { return Err(badmode(name, op)); },
         }
         // Group 3 aka bit 0
+        0 => match op {
+             Operand::Immediate(x) => (0, vec![x]),
+             Operand::Absolute(x) => if x < 256 {
+                 // zp
+                 (1, u8b(x))
+             } else {
+                 // abs
+                 (3, u16b(x))
+             },
+             Operand::AbsX(x) => if x < 256 {
+                 // zp x
+                 (5, u8b(x))
+             } else {
+                 (7, u16b(x))
+             }
+             _ => { return Err(badmode(name, op)); },
+        },
         _ => { return Err(badmode(name, op)); },
     };
     assert!(opbits <= 7);
@@ -222,6 +254,8 @@ enum Operand {
     AbsY(u16),      // val, Y
     IndirectX(u8), // (oper,X)
     IndirectY(u8), // (oper), Y
+    Indirect(u16),  // (oper)  // used only for jmp
+                   
 }
 
 impl Operand {
@@ -261,6 +295,12 @@ impl Operand {
             let arg = v.get(1).unwrap().as_str();
             let arg = read_val(arg)?;
             return Ok(Operand::AbsY(arg));
+        }
+        // Indirect for jmp
+        if let Some(v) = Self::maybe_re("\\((.*)\\)")?.captures(arg) {
+            let arg = v.get(1).unwrap().as_str();
+            let arg = read_val(arg)?;
+            return Ok(Operand::Indirect(arg));
         }
         Ok(match arg.strip_prefix("#") {
             Some(v) => {
@@ -509,5 +549,35 @@ mod test_asm {
         // abs,x
         assert!(
             assemble("ldx $ff, x").is_err());
+    }
+
+    #[test]
+    fn test_jmps() {
+        assert_eq!(
+            Ok(vec![0x6c, 0xba, 0xda]),
+            assemble("jmp ($daba)"));
+        assert_eq!(
+            Ok(vec![0x4c, 0xda, 0xd0]),
+            assemble("jmp $d0da"));
+    }
+
+    #[test]
+    fn test_grp3_ldy() {
+        // ldy supports all group 3 addressing modes
+        assert_eq!(  // imm
+            Ok(vec![0xA0, 0xde]),
+            assemble("ldy #$de"));
+        assert_eq!(  // zp
+            Ok(vec![0xA4, 10]),
+            assemble("ldy 10"));
+        assert_eq!(  // zp x
+            Ok(vec![0xB4, 100]),
+            assemble("ldy 100,x"));
+        assert_eq!(  // abs
+            Ok(vec![0xac, 0xb0, 0xda]),
+            assemble("ldy $dab0"));
+        assert_eq!(  // abs x
+            Ok(vec![0xbc, 0xb0, 0xda]),
+            assemble("ldy $dab0, x"));
     }
 }
