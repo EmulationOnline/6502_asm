@@ -25,7 +25,7 @@ fn read_val(v: &str) -> Result<u16, String> {
     };
     match u16::from_str_radix(rest, base) {
         Ok(v) => Ok(v),
-        Err(e) => Err(format!("failed to parse '{rest}' as value")),
+        Err(e) => Err(format!("failed to parse '{rest}' as base {base} value")),
     }
 }
 
@@ -156,29 +156,45 @@ fn encode(name: &str, op: Operand) -> Result<Binary, String> {
 
     // TODO: handle jump exceptions. add tests.
 
-    // TODO: check addressing mode compatibility, determine address mode bits.
-    let (mode, mut arg) = match (group, op) {
+    fn badmode(name: &str, arg: Operand) -> String {
+        format!("Unsupported (op, arg) pair ({name}, {arg:?})")
+    }
+    let (mode, mut arg) = match group {
         // Group 1
-        (1, Operand::IndirectX(x)) => (0, vec![x]),
-        (1, Operand::Absolute(x)) => if x < 256 {
-            (1, u8b(x))  // ZPG
-        } else {
-            (3, u16b(x))  // Absolute
+        1 => match op {
+            Operand::IndirectX(x) => (0, vec![x]),
+            Operand::Absolute(x) => if x < 256 {
+                (1, u8b(x))  // ZPG
+            } else {
+                (3, u16b(x))  // Absolute
+            },
+            Operand::Immediate(x) => (2, vec![x]),
+            Operand::IndirectY(x) => (4, vec![x]),
+            Operand::AbsX(x) => if x < 256 {
+                (5, u8b(x)) // ZPX
+            } else {
+                (7, u16b(x)) // AbsX
+            },
+            Operand::AbsY(x) => (6, u16b(x)),
+            _ => { return Err(badmode(name, op)); },
         },
-        (1, Operand::Immediate(x)) => (2, vec![x]),
-        (1, Operand::IndirectY(x)) => (4, vec![x]),
-        (1, Operand::AbsX(x)) => if x < 256 {
-            (5, u8b(x)) // ZPX
-        } else {
-            (7, u16b(x)) // AbsX
-        },
-        (1, Operand::AbsY(x)) => (6, u16b(x)),
-
-        // Group 2
+        2 => match op {
+            Operand::Immediate(x) => (0, vec![x]),
+            Operand::Absolute(x) => if x < 256 {
+                (1, u8b(x))  // zp
+            } else {
+                (3, u16b(x)) // abs
+            },
+            Operand::Acc => (2, vec![]),
+            Operand::AbsY(x) => if x < 256 {
+                (5, u8b(x))  // zpy
+            } else {
+                (7, u16b(x)) // abs y
+            },
+            _ => { return Err(badmode(name, op)); },
+        }
         // Group 3 aka bit 0
-        _ => {
-            return Err(format!("Unsupported (op, arg) pair ({name}, {op:?})"));
-        },
+        _ => { return Err(badmode(name, op)); },
     };
     assert!(opbits <= 7);
     assert!(mode <= 7);
@@ -199,6 +215,7 @@ fn encode(name: &str, op: Operand) -> Result<Binary, String> {
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum Operand {
     None,
+    Acc,           // lsr a
     Immediate(u8), // #val
     Absolute(u16),  // val. can be zp if small
     AbsX(u16),      // val, X, can be zp if small
@@ -218,6 +235,9 @@ impl Operand {
     pub fn read(arg: &str) -> Result<Operand, String> {
         if arg.len() == 0 {
             return Ok(Operand::None);
+        }
+        if arg == "a" {
+            return Ok(Operand::Acc);
         }
         // Indirects
         if let Some(v) = Self::maybe_re("\\((.*),x\\)")?.captures(arg) {
@@ -424,6 +444,9 @@ mod test_asm {
         assert_eq!(  // zpg, x
             Ok(vec![0x75, 0xFF]),
             assemble("adc $FF,x"));
+        assert_eq!(  // zpg, x
+            Ok(vec![0x75, 0xFF]),
+            assemble("adc 255, x"));
     }
     #[test]
     fn test_adc_abs() {
@@ -454,5 +477,37 @@ mod test_asm {
         assert_eq!(  // ind y
             Ok(vec![0x71, 0xde]),
             assemble("adc ($de),y"));
+    }
+
+    #[test]
+    fn test_grp2_modes() {
+        assert_eq!(  // imm
+            Ok(vec![0xA2, 10]),
+            assemble("ldx #10"));
+        assert_eq!(  // zpg
+            Ok(vec![0xA6, 0xfa]),
+            assemble("ldx $FA"));
+        assert_eq!(  // zp,y
+            Ok(vec![0xb6, 0xfa]),
+            assemble("ldx $FA,y"));
+        assert_eq!(  // abs
+            Ok(vec![0xae, 0xfe, 0xca]),
+            assemble("ldx $cafe"));
+        assert_eq!(  // abs,y
+            Ok(vec![0xbe, 0xeb, 0xbe]),
+            assemble("ldx $beeb,y"));
+        // some instructions support acc mode
+        assert_eq!(  // lsr a
+            Ok(vec![0x4a]),
+                assemble("lsr a"));
+    }
+
+
+    #[test]
+    fn test_grp2_badmode() {
+        // ldx is a group 2 instruction, which doesnt support
+        // abs,x
+        assert!(
+            assemble("ldx $ff, x").is_err());
     }
 }
