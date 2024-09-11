@@ -89,50 +89,47 @@ fn encode(name: &str, op: Operand) -> Result<Binary, String> {
         "ora"/*fake placeholder for 0*/, "bit", "jmp", "jmp", /*jmp abs*/ "sty",
         "ldy", "cpy", "cpx",
     ];
+    const BRANCHES : &[(&str, u8)] = &[
+        // 0x10 => (Instruction::BranchPlus, 2),
+        // 0x30 => (Instruction::BranchMinus, 2),
+        // 0x50 => (Instruction::BranchOverflowClear, 2),
+        // 0x70 => (Instruction::BranchOverflowSet, 2),
+        // 0x90 => (Instruction::BranchCarryClear, 2),
+        // 0xB0 => (Instruction::BranchCarrySet, 2),
+        // 0xD0 => (Instruction::BranchNE, 2),
+        // 0xF0 => (Instruction::BranchEQ, 2),
+    ];
     const REST : &[(&str, u8)] = &[
         ("brk", 0x00),
-    // // Single byte instructions
-    // // Branches
-    // BranchPlus, // BPL,
-    // BranchMinus, // BMI,
-    // BranchOverflowClear, // BVC,
-    // BranchOverflowSet,// BVS,
-    // BranchCarryClear, // BCC,
-    // BranchCarrySet, // BCS,
-    // BranchNE, // BNE,
-    // BranchEQ, // BEQ,
-    // // Interrupts etc
-    // Break,               // BRK
-    // JumpSubroutine,      // JSR
-    // ReturnFromInterrupt, // RTI
-    // ReturnFromSubroutine,
+        // Calls
+        ("jsr", 0x20),
+        ("rti", 0x40),
+        ("rts", 0x60),
+        // Others
+        ("php", 0x08),
+        ("plp", 0x28),
+        ("pha", 0x48),
+        ("pla", 0x68),
+        ("dey", 0x88),
+        ("tay", 0xA8),
+        ("iny", 0xC8),
+        ("inx", 0xE8),
 
-    // // Rest
-    // PushStatus,
-    // PullStatus,
-    // PushAcc,
-    // PullAcc,
-    // DecY,
-    // TransferAccY,
-    // IncY,
-    // IncX,
+        ("clc", 0x18),
+        ("sec", 0x38),
+        ("cli", 0x58),
+        ("sei", 0x78),
+        ("tya", 0x98),
+        ("clv", 0xB8),
+        ("cld", 0xD8),
+        ("sed", 0xF8),
 
-    // CarryClear,
-    // CarrySet,
-    // IntDisableClear,
-    // IntDisableSet,
-    // TransferYAcc,
-    // OverflowClear,
-    // DecimalClear,
-    // DecimalSet,
-
-    // TransferXAcc,
-    // TransferXStack,
-    // TransferAccX,
-    // TransferStackX,
-    // DecX,
-    // Nop,
-    // let
+        ("txa", 0x8A),
+        ("txs", 0x9A),
+        ("tax", 0xAA),
+        ("tsx", 0xBA),
+        ("dex", 0xCA),
+        ("nop", 0xEA),
     ];
 
     let (group, opbits) = if let Some(p) = GRP1.iter().position(|&n| n == name) {
@@ -580,4 +577,61 @@ mod test_asm {
             Ok(vec![0xbc, 0xb0, 0xda]),
             assemble("ldy $dab0, x"));
     }
+
+    #[test]
+    fn test_single_byte_instrs() {
+        let table : &[(&str, u8)]= &[
+            // Interrupts etc
+            ("brk", 0x00),
+            ("jsr", 0x20),
+            ("rti", 0x40),
+            ("rts", 0x60),
+
+            // Rest
+            ("php", 0x08), // push status
+            ("plp", 0x28), // pull status
+            ("pha", 0x48),
+            ("pla", 0x68),
+            ("dey", 0x88),
+            ("tay", 0xA8),
+            ("iny", 0xC8),
+            ("inx", 0xE8),
+
+            ("clc", 0x18), // carry clear
+            ("sec", 0x38),  // carry set 
+            ("cli", 0x58),
+            ("sei", 0x78),
+            ("tya", 0x98),
+            ("clv", 0xb8), // overflow clear
+            ("cld", 0xd8), // decimal clear 
+            ("sed", 0xf8),
+
+            ("txa", 0x8a),
+            ("txs", 0x9a),
+            ("tax", 0xaa),
+            ("tsx", 0xba),
+            ("dex", 0xca),
+            ("nop", 0xea),
+         ];
+         for (name, byte) in table {
+             assert_eq!(
+                 Ok(vec![*byte]),
+                 assemble(name));
+         }
+    }
+
+    #[test]
+    fn test_branches() {
+        // branches encode with a relative offset
+        assert!(false);
+            // ("bpl", // BPL,
+            // (BranchMinus, // BMI,
+            // (BranchOverflowClear, // BVC,
+            // (BranchOverflowSet,// BVS,
+            // (BranchCarryClear, // BCC,
+            // (BranchCarrySet, // BCS,
+            // (BranchNE, // BNE,
+            // (BranchEQ, // BEQ,
+    }
 }
+
