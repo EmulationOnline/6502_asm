@@ -146,7 +146,7 @@ fn encode(name: &str, op: Operand) -> Result<Binary, String> {
                 return Ok(vec![*byte]);
             },
             _ => {
-                return Err(format!("Unknown instruction: {name}"));
+                return Err(format!("Unknown instruction: '{name}'"));
             }
         }
     };
@@ -368,6 +368,7 @@ fn tokenize(input: &str) -> Result<Vec<Line>, String> {
                 };
                 Ok(Line::Db(vals))
             }
+            "" => Ok(Line::None),
             name => {
                 // opcode handler.
                 let arg = parts[1..].join("");
@@ -461,6 +462,16 @@ mod test_asm {
         assert_eq!(
             Ok(vec![10]),
             assemble("db 10; this is a comment"));
+    }
+
+    #[test]
+    fn test_empty_line() {
+        assert_eq!(
+            Ok(vec![0x10, 0x25]),
+            assemble(r#"
+            db $10
+
+            db $25"#));
     }
 
     // all group 1 modes(8) for adc
@@ -620,18 +631,59 @@ mod test_asm {
          }
     }
 
+    // #[test]
+    // fn test_branches() {
+    //     // branches encode with a relative offset
+    //     assert!(false);
+    //         // ("bpl", // BPL,
+    //         // (BranchMinus, // BMI,
+    //         // (BranchOverflowClear, // BVC,
+    //         // (BranchOverflowSet,// BVS,
+    //         // (BranchCarryClear, // BCC,
+    //         // (BranchCarrySet, // BCS,
+    //         // (BranchNE, // BNE,
+    //         // (BranchEQ, // BEQ,
+    // }
+
+    // #[test]
+    // fn test_label_start() {
+    //     // With no org, start should be 0x0000
+    //     // jmps are encoded directly
+    //     assert_eq!(
+    //         Ok(vec![
+    //             0x4c, 0, 0
+    //         ]),
+    //         assemble(r#"
+    //         .start:
+    //           jmp .start"#));
+    // }
+    // #[test]
+    // fn test_label_middle() {
+    //     // jump in the middle of a set of
+    //     // instructions
+
+    //     assert_eq!(
+    //         Ok(vec![0x00, 0x4c, 0x01, 0x00]),
+    //         assemble(r#"
+    //          brk
+    //          .target:
+    //           jmp .target"#));
+    // }
+
     #[test]
-    fn test_branches() {
-        // branches encode with a relative offset
-        assert!(false);
-            // ("bpl", // BPL,
-            // (BranchMinus, // BMI,
-            // (BranchOverflowClear, // BVC,
-            // (BranchOverflowSet,// BVS,
-            // (BranchCarryClear, // BCC,
-            // (BranchCarrySet, // BCS,
-            // (BranchNE, // BNE,
-            // (BranchEQ, // BEQ,
+    fn test_org_start() {
+        // setting an org immediately shouldnt change the length of the
+        // program. This would be done if the entire rom is meant to be loaded
+        // at an offset, as is the case for some systems.
+        assert_eq!(
+            Ok(vec![10, 0x10]),
+            assemble(r#"
+
+            org $1000
+            db 10
+            db $10
+
+            "#));
     }
 }
 
