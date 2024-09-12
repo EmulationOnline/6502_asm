@@ -6,9 +6,9 @@
 // made to deal with DoS from inputs.
 
 // TODO: tricky remaining issues:
-// - jumps. relative vs abs?
-// - org. locate here vs placefill upto
+// - branches. all relative. need 2 pass
 // - variable namespace?
+
 use regex::Regex;
 use std::collections::HashMap;
 
@@ -27,32 +27,6 @@ fn read_val(v: &str) -> Result<u16, String> {
     match u16::from_str_radix(rest, base) {
         Ok(v) => Ok(v),
         Err(e) => Err(format!("failed to parse '{rest}' as base {base} value")),
-    }
-}
-
-// Holds opcode bytes for instructions in each
-// supported mode.
-// Using a struct-like enum helps avoid missing
-// cases.
-enum Opcodes {
-    Group1 {
-        imm: u8,  // adc #oper
-        zp: u8,   // adc oper,  < 256
-        zpx: u8,  // adc oper,x < 256
-        abs: u8,  // adc oper
-        absx: u8, // adc oper,x
-        absy: u8, // adc oper,y
-        indx: u8, // adc (oper,x)
-        indy: u8, // adc (oper), y
-    }
-}
-
-impl Opcodes {
-    pub fn all(&self) -> Vec<u8> {
-        match *self {
-            Opcodes::Group1 {imm, zp, zpx, abs, absx, absy, indx, indy}
-                => vec![imm, zp, zpx, abs, absx, absy, indx, indy],
-        }
     }
 }
 
@@ -242,7 +216,7 @@ fn encode(name: &str, op: Operand) -> Result<Binary, String> {
 
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone)]
 enum Operand {
     None,
     Acc,           // lsr a
@@ -253,6 +227,7 @@ enum Operand {
     IndirectX(u8), // (oper,X)
     IndirectY(u8), // (oper), Y
     Indirect(u16),  // (oper)  // used only for jmp
+    Label(String),  // .name
                    
 }
 
@@ -270,6 +245,9 @@ impl Operand {
         }
         if arg == "a" {
             return Ok(Operand::Acc);
+        }
+        if arg.starts_with(".") {
+            return Ok(Operand::Label(arg.to_string()));
         }
         // Indirects
         if let Some(v) = Self::maybe_re("\\((.*),x\\)")?.captures(arg) {
@@ -316,8 +294,8 @@ impl Operand {
 
 // Handles the result of parsing, not necessarily valid yet.
 enum Line {
-    // Labels start with a dot, and are followed by a colon
     Org(usize),
+    // Labels start with a dot, and are followed by a colon
     Label(String),
     Variable(String, u16),
     Opcode(String, Operand),
@@ -336,7 +314,7 @@ impl Line {
             Line::Label(_) => Ok(Vec::new()),
             Line::Variable(_, _) => panic!("unimplemented"),
             Line::Opcode(op, v) => {
-                encode(op, *v)
+                encode(op, v.clone())
             }
             Line::Db(v) => Ok(v.clone()),
         }
@@ -355,12 +333,18 @@ fn tokenize(input: &str) -> Result<Vec<Line>, String> {
             None => line,
         }
     }
+    fn is_label_line(word: &str) -> bool {
+        // true iff this word designates a label placement.
+        // starts with . and ends with :
+        word.starts_with(".") && word.ends_with(":")
+    }
     fn tok(line: &str) -> Result<Line, String> {
         let line = line.trim();
         let line = strip_comment(&line);
         let parts :Vec<_> = line.split(" ").collect();
         let rest = parts[1..].join("");
         match parts[0] {
+            "" => Ok(Line::None),
             "db" => {
                 let mut vals : Vec<u8> = Vec::with_capacity(parts.len());
                 for i in 1 .. parts.len() {
@@ -378,7 +362,15 @@ fn tokenize(input: &str) -> Result<Vec<Line>, String> {
                 let v = read_val(&rest)?;
                 Ok(Line::Org(v as usize))
             },
-            "" => Ok(Line::None),
+            x if is_label_line(x) => {
+                // Label
+                if rest.len() > 0 {
+                    // Fail, as the rest of the line would otherwise be silently dropped
+                    return Err(format!("label '{}' must be on its own line.", parts[0]));
+                }
+                let label = parts[0].strip_suffix(":").unwrap();
+                Ok(Line::Label(label.to_string()))
+            }
             name => {
                 // opcode handler.
                 let operand = Operand::read(&rest)?;
@@ -425,6 +417,12 @@ pub fn assemble(input: &str) -> Result<Binary, String> {
         }
     };
 
+    // label name to the first byte of two bytes that need updating
+    let mut label_stubs : HashMap<String, Vec<usize>> = HashMap::new();
+    let mut label_vals : HashMap<String, usize> = HashMap::new();
+
+    // Pass one. Assemble as much as possible, making note where fixups
+    // are needed in pass 2.
     for line in tokens {
         match line {
             Line::Org(next_address) => {
@@ -433,6 +431,24 @@ pub fn assemble(input: &str) -> Result<Binary, String> {
                     return Err(format!("reuse of org 0x{next_address:4X} would clobber."));
                 }
                 org = next_address;
+            },
+            Line::Label(name) => {
+                let address = org + current.len();
+                if label_vals.contains_key(&name) {
+                    return Err(format!("duplicate definition for label: {name}"));
+                }
+                label_vals.insert(name, address);
+            },
+            Line::Opcode(op, Operand::Label(labelname)) => {
+                // Assemble as an absolute
+                let address = org + current.len() +1;
+                if !label_stubs.contains_key(&labelname) {
+                    label_stubs.insert(labelname.clone(), Vec::new());
+                }
+                label_stubs.get_mut(&labelname).unwrap().push(address);
+                let mut bytes = Line::Opcode(op, Operand::Absolute(0)).asm().unwrap();
+                current.append(&mut bytes);
+
             },
             _ => {
                 // simply assemble
@@ -443,6 +459,13 @@ pub fn assemble(input: &str) -> Result<Binary, String> {
     }
     push(&mut chunks, &mut current, &mut min_org, &mut max_org, org);
 
+    if min_org == usize::MAX {
+        // no data
+        return Ok(Binary::new());
+    }
+
+
+
     // flatten chunks
     let mut output : Binary = Vec::new();
     output.resize(max_org + chunks[&max_org].len() - min_org,
@@ -450,6 +473,17 @@ pub fn assemble(input: &str) -> Result<Binary, String> {
     for (start, chunk) in chunks {
         let dest = start - min_org;
         output.as_mut_slice()[dest .. dest + chunk.len()].copy_from_slice(&chunk);
+    }
+
+    // Pass two: Rewrite found labels.
+    // Note, its easier to perform on the flat memory
+    // Currently only handles absolute label references.
+    for (labelname, positions) in label_stubs {
+        let val = u16b(label_vals[&labelname] as u16);
+        for pos in positions {
+            let dest = pos - min_org;
+            output.as_mut_slice()[dest .. dest+2].copy_from_slice(&val);
+        }
     }
 
     Ok(output)
@@ -694,31 +728,60 @@ mod test_asm {
     //         // (BranchEQ, // BEQ,
     // }
 
-    // #[test]
-    // fn test_label_start() {
-    //     // With no org, start should be 0x0000
-    //     // jmps are encoded directly
-    //     assert_eq!(
-    //         Ok(vec![
-    //             0x4c, 0, 0
-    //         ]),
-    //         assemble(r#"
-    //         .start:
-    //           jmp .start"#));
-    // }
-    // #[test]
-    // fn test_label_middle() {
-    //     // jump in the middle of a set of
-    //     // instructions
+    #[test]
+    fn test_label_assembles() {
+        // unused label, should still assemble.
+        assert_eq!(
+            Ok(vec![0x10, 0x24]),
+            assemble(".start: 
+                db $10 $24"));
+    }
 
-    //     assert_eq!(
-    //         Ok(vec![0x00, 0x4c, 0x01, 0x00]),
-    //         assemble(r#"
-    //          brk
-    //          .target:
-    //           jmp .target"#));
-    // }
+    #[test]
+    fn test_label_supports_jump() {
+        assert_eq!(
+            Ok(vec![0xea, 0x4c, 0x01, 0x00]),
+            assemble(r#"
+            nop
+            .start:
+            jmp .start
+            "#));
+    }
+    #[test]
+    fn test_label_start() {
+        // With no org, start should be 0x0000
+        // jmps are encoded directly
+        assert_eq!(
+            Ok(vec![
+                0x4c, 0, 0
+            ]),
+            assemble(r#"
+            .start:
+              jmp .start"#));
+    }
 
+    #[test]
+    fn test_label_middle() {
+        // jump in the middle of a set of
+        // instructions
+
+        assert_eq!(
+            Ok(vec![0x00, 0x4c, 0x01, 0x00]),
+            assemble(r#"
+             brk
+             .target:
+              jmp .target"#));
+    }
+    
+    #[test]
+    fn test_assemble_empty() {
+        assert_eq!(
+            Ok(vec![]),
+            assemble(r#"
+            org 0
+
+            "#));
+    }
 
     #[test]
     fn test_org_start() {
@@ -750,16 +813,16 @@ mod test_asm {
 
     }
 
-    // #[test]
-    // fn test_org_start_jump() {
-    //     // But an org at the start can influence jumps
-    //     assert_eq!(
-    //         Ok(vec![0x4c, 0x00, 0x10]),
-    //         assemble(r#"
-    //         org $1000
-    //         .start:
-    //         jmp .start
-    //         "#));
-    // }
+    #[test]
+    fn test_org_start_jump() {
+        // But an org at the start can influence jumps
+        assert_eq!(
+            Ok(vec![0x4c, 0x00, 0x10]),
+            assemble(r#"
+            org $1000
+            .start:
+            jmp .start
+            "#));
+    }
 }
 
