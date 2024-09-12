@@ -22,5 +22,6 @@ fn main() {
     println!("Output size: 0x{:X}({} bytes)",
         output.len(), output.len());
 
-    std::fs::write(out_filename, output);
+    std::fs::write(out_filename, output).expect("failed to write.");
+    println!("Wrote to {out_filename}");
 }

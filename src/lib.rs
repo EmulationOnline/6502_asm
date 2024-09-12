@@ -539,12 +539,12 @@ pub fn assemble(input: &str) -> Result<Binary, String> {
     }
     // Relative references for branches.
     for (labelname, position, line_no) in branches {
-        let branch_addr = position - 1;
+        let from_addr = position + 1; // branches relative to start of next instr
         if !label_vals.contains_key(&labelname) {
             return Err(format!("cannot branch to '{labelname}' no such label."));
         }
         let label_dest = label_vals[&labelname];
-        let offset : isize = (label_dest as isize - branch_addr as isize);
+        let offset : isize = (label_dest as isize - from_addr as isize);
         if offset < -128 || offset > 127 {
             return Err(format!(
                     "Line {line_no}: branch offset out of range of signed byte [-128 to 127]"));
