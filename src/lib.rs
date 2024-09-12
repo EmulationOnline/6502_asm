@@ -129,6 +129,16 @@ fn encode(name: &str, op: Operand) -> Result<Binary, String> {
             _ => { return Err(badmode(name, op)); },
         }
     }
+    // treat dw as an instruction, to enable labels as arguments
+    if name == "dw" {
+        match op {
+            Operand::Absolute(v) => {
+                return Ok(u16b(v));
+            }, 
+            _ => { return Err(badmode(name, op)); },
+        }
+    }
+
 
     let (group, opbits) = if let Some(p) = GRP1.iter().position(|&n| n == name) {
         (1, p)
@@ -165,6 +175,8 @@ fn encode(name: &str, op: Operand) -> Result<Binary, String> {
         };
         return Ok(vec![opcode, bytes[0], bytes[1]]);
     }
+
+
 
     let (mode, mut arg) = match group {
         // Group 1
@@ -378,16 +390,6 @@ fn tokenize(input: &str) -> Result<Vec<Line>, String> {
                 };
                 Ok(Line::Db(vals))
             },
-            "dw" => {
-                // little endian u16
-                let mut vals : Vec<u8> = Vec::with_capacity(parts.len()*2);
-                for i in 1 .. parts.len() {
-                    let v = read_val(parts[i])?;
-                    let mut bytes = u16b(v);
-                    vals.append(&mut bytes);
-                }
-                Ok(Line::Db(vals))
-            },
             "org" => {
                 let v = read_val(&rest)?;
                 Ok(Line::Org(v as usize))
@@ -475,7 +477,12 @@ pub fn assemble(input: &str) -> Result<Binary, String> {
                 // Branches are relative(u8), everything else is absolute (u16)
                 // First pass writes a 0, then second pass writes a proper value.
 
-                let address = org + current.len() +1;
+                let address = if op == "dw" {
+                    // dw has no opcode byte
+                    org + current.len()
+                } else {
+                    org + current.len() +1
+                };
                 if let Some(opcode) = branch_opcode(&op) {
                     // Relative, one byte.
                     branches.push((labelname, address, line_no));
@@ -526,7 +533,8 @@ pub fn assemble(input: &str) -> Result<Binary, String> {
         let val = u16b(label_vals[&labelname] as u16);
         for pos in positions {
             let dest = pos - min_org;
-            output.as_mut_slice()[dest .. dest+2].copy_from_slice(&val);
+            output[dest] = val[0];
+            output[dest+1] = val[1];
         }
     }
     // Relative references for branches.
@@ -596,12 +604,23 @@ mod test_asm {
     fn test_dw() {
         let cases = &[
             (vec![0xad, 0xde], "dw $dead"),
-            (vec![0xfe, 0xca, 0xbe, 0xba], "dw $cafe $babe"),
+            (vec![0xfe, 0xca, 0xbe, 0xba], "dw $cafe 
+             dw $babe"),
         ];
         for (want, input) in cases {
             let res = assemble(input).expect("asm failed");
             assert_eq!(*want, res);
         }
+    }
+
+    #[test]
+    fn test_dw_at_end() {
+        assert_eq!(
+            Ok(vec![0x05, 0x04]),
+            assemble(r#"
+            org $0405
+            .start:
+            dw .start"#));
     }
 
     #[test]
@@ -948,5 +967,6 @@ mod test_asm {
             jmp .start
             "#));
     }
+
 }
 
