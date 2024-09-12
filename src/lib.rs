@@ -49,6 +49,25 @@ fn u16b(v: u16) -> Vec<u8> {
     vec![(v & 0xFF) as u8, (v>>8) as u8]
 }
 
+fn branch_opcode(name: &str) -> Option<u8> {
+    const BRANCHES : &[(&str, u8)] = &[
+        ("bpl", 0x10),
+        ("bmi", 0x30),
+        ("bvc", 0x50),
+        ("bvs", 0x70),
+        ("bcc", 0x90),
+        ("bcs", 0xB0),
+        ("bne", 0xD0),
+        ("beq", 0xF0),
+    ];
+    for (n, b) in BRANCHES {
+        if *n == name {
+            return Some(*b);
+        }
+    }
+    None
+}
+
 fn encode(name: &str, op: Operand) -> Result<Binary, String> {
     // Order matters, as index is also the instruction bits.
     // ora -> 000, and = 001 etc
@@ -63,16 +82,6 @@ fn encode(name: &str, op: Operand) -> Result<Binary, String> {
     const GRP3 : &[&str] = &[ 
         "ora"/*fake placeholder for 0*/, "bit", "jmp", "jmp", /*jmp abs*/ "sty",
         "ldy", "cpy", "cpx",
-    ];
-    const BRANCHES : &[(&str, u8)] = &[
-        // 0x10 => (Instruction::BranchPlus, 2),
-        // 0x30 => (Instruction::BranchMinus, 2),
-        // 0x50 => (Instruction::BranchOverflowClear, 2),
-        // 0x70 => (Instruction::BranchOverflowSet, 2),
-        // 0x90 => (Instruction::BranchCarryClear, 2),
-        // 0xB0 => (Instruction::BranchCarrySet, 2),
-        // 0xD0 => (Instruction::BranchNE, 2),
-        // 0xF0 => (Instruction::BranchEQ, 2),
     ];
     const REST : &[(&str, u8)] = &[
         ("brk", 0x00),
@@ -107,6 +116,20 @@ fn encode(name: &str, op: Operand) -> Result<Binary, String> {
         ("nop", 0xEA),
     ];
 
+    fn badmode(name: &str, arg: Operand) -> String {
+        format!("Unsupported (op, arg) pair ({name}, {arg:?})")
+    }
+
+    // Branches dont follow the group pattern, 1 byte opcode + 1 byte arg
+    if let Some(opcode) = branch_opcode(name) {
+        match op {
+            Operand::Immediate(v) => {
+                return Ok(vec![opcode, v]);
+            }, 
+            _ => { return Err(badmode(name, op)); },
+        }
+    }
+
     let (group, opbits) = if let Some(p) = GRP1.iter().position(|&n| n == name) {
         (1, p)
     } else if let Some(p) = GRP2.iter().position(|&n| n == name) {
@@ -126,11 +149,8 @@ fn encode(name: &str, op: Operand) -> Result<Binary, String> {
         }
     };
 
-    fn badmode(name: &str, arg: Operand) -> String {
-        format!("Unsupported (op, arg) pair ({name}, {arg:?})")
-    }
 
-    // jmp instructions dont follow the rule
+    // jmp instructions dont follow the group pattern. 1 byte opcode + 2 bytes arg
     if name == "jmp" {
         let (opcode, bytes) = match op {
             Operand::Indirect(x) => {
@@ -430,10 +450,12 @@ pub fn assemble(input: &str) -> Result<Binary, String> {
     // label name to the first byte of two bytes that need updating
     let mut label_stubs : HashMap<String, Vec<usize>> = HashMap::new();
     let mut label_vals : HashMap<String, usize> = HashMap::new();
+    // Label, address position, lineno. opcode is at addr-1
+    let mut branches : Vec<(String, usize, usize)> = Vec::new();
 
     // Pass one. Assemble as much as possible, making note where fixups
     // are needed in pass 2.
-    for line in tokens {
+    for (line_no, line) in tokens.into_iter().enumerate() {
         match line {
             Line::Org(next_address) => {
                 push(&mut chunks, &mut current, &mut min_org, &mut max_org, org);
@@ -450,14 +472,26 @@ pub fn assemble(input: &str) -> Result<Binary, String> {
                 label_vals.insert(name, address);
             },
             Line::Opcode(op, Operand::Label(labelname)) => {
-                // Assemble as an absolute
+                // Branches are relative(u8), everything else is absolute (u16)
+                // First pass writes a 0, then second pass writes a proper value.
+
                 let address = org + current.len() +1;
-                if !label_stubs.contains_key(&labelname) {
-                    label_stubs.insert(labelname.clone(), Vec::new());
+                if let Some(opcode) = branch_opcode(&op) {
+                    // Relative, one byte.
+                    branches.push((labelname, address, line_no));
+                    let mut bytes = Line::Opcode(op, Operand::Immediate(0)).asm().unwrap();
+                    current.append(&mut bytes);
+                } else {
+                    // Absolute, 2 bytes.
+
+                    if !label_stubs.contains_key(&labelname) {
+                        // init vector
+                        label_stubs.insert(labelname.clone(), Vec::new());
+                    }
+                    label_stubs.get_mut(&labelname).unwrap().push(address);
+                    let mut bytes = Line::Opcode(op, Operand::Absolute(0)).asm().unwrap();
+                    current.append(&mut bytes);
                 }
-                label_stubs.get_mut(&labelname).unwrap().push(address);
-                let mut bytes = Line::Opcode(op, Operand::Absolute(0)).asm().unwrap();
-                current.append(&mut bytes);
 
             },
             _ => {
@@ -487,7 +521,7 @@ pub fn assemble(input: &str) -> Result<Binary, String> {
 
     // Pass two: Rewrite found labels.
     // Note, its easier to perform on the flat memory
-    // Currently only handles absolute label references.
+    // Absolute references:
     for (labelname, positions) in label_stubs {
         let val = u16b(label_vals[&labelname] as u16);
         for pos in positions {
@@ -495,6 +529,22 @@ pub fn assemble(input: &str) -> Result<Binary, String> {
             output.as_mut_slice()[dest .. dest+2].copy_from_slice(&val);
         }
     }
+    // Relative references for branches.
+    for (labelname, position, line_no) in branches {
+        let branch_addr = position - 1;
+        if !label_vals.contains_key(&labelname) {
+            return Err(format!("cannot branch to '{labelname}' no such label."));
+        }
+        let label_dest = label_vals[&labelname];
+        let offset : isize = (label_dest as isize - branch_addr as isize);
+        if offset < -128 || offset > 127 {
+            return Err(format!(
+                    "Line {line_no}: branch offset out of range of signed byte [-128 to 127]"));
+        }
+        let offset : i8 = offset as i8;
+        output[position - min_org] = offset as u8;
+    }
+
 
     Ok(output)
 }
@@ -736,23 +786,51 @@ mod test_asm {
          }
     }
 
-    // #[test]
-    // fn test_branches() {
-    //     // branches encode with a relative offset
-    //     assert!(false);
-    //         // ("bpl", // BPL,
-    //         // (BranchMinus, // BMI,
-    //         // (BranchOverflowClear, // BVC,
-    //         // (BranchOverflowSet,// BVS,
-    //         // (BranchCarryClear, // BCC,
-    //         // (BranchCarrySet, // BCS,
-    //         // (BranchNE, // BNE,
-    //         // (BranchEQ, // BEQ,
-    // }
+    #[test]
+    fn test_branches() {
+        // branches encode with a relative offset
+        // each is two bytes (opcode + arg)
+        assert_eq!(
+            Ok(vec![
+                0xb0,
+                0x10, 0xFF,
+                0x30, 0xFD,
+                0x50, 0xFB,
+                0x70, 0xF9,
+                0x90, 0xF7,
+                0xB0, 0xF5,
+                0xD0, 0xF3,
+                0xF0, 0xF1,
+                0xad, 0xde,
+            ]),
+            assemble(r#"
+            .start:
+            db $b0
+            bpl .start ; -1
+            bmi .start ; -3
+            bvc .start ; -5
+            bvs .start ; -7
+            bcc .start ; -9
+            bcs .start ; -11
+            bne .start ; -13
+            beq .start ; -15
+            dw $dead
+            "#));
+
+
+            // ("bpl", // BPL,
+            // (BranchMinus, // BMI,
+            // (BranchOverflowClear, // BVC,
+            // (BranchOverflowSet,// BVS,
+            // (BranchCarryClear, // BCC,
+            // (BranchCarrySet, // BCS,
+            // (BranchNE, // BNE,
+            // (BranchEQ, // BEQ,
+    }
     #[test]
     fn test_branch_forward() {
         assert_eq!(
-            Ok(vec![0x10, 3, 0xea, 0xea, 0xea]),
+            Ok(vec![0x10, 4, 0xea, 0xea, 0xea]),
             assemble(r#"
             bpl .end
             nop
@@ -762,10 +840,9 @@ mod test_asm {
     }
     #[test]
     fn test_branch_back() {
-        let offset : i8 = -127+2;
-        // TODO: double check math with another assembler.
+        // TODO: double check by running in asm
         assert_eq!(
-            Ok(vec![0xea, 0xea, 0x10, offset as u8, 0xea, 0xea, 0xea]),
+            Ok(vec![0xea, 0xea, 0x10, 0xFE, 0xea, 0xea]),
             assemble(r#"
             .before:
             nop
