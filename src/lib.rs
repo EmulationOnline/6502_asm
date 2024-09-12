@@ -10,6 +10,7 @@
 // - org. locate here vs placefill upto
 // - variable namespace?
 use regex::Regex;
+use std::collections::HashMap;
 
 pub type Binary = Vec<u8>;
 
@@ -316,6 +317,7 @@ impl Operand {
 // Handles the result of parsing, not necessarily valid yet.
 enum Line {
     // Labels start with a dot, and are followed by a colon
+    Org(usize),
     Label(String),
     Variable(String, u16),
     Opcode(String, Operand),
@@ -327,6 +329,9 @@ impl Line {
     // This function performs the opcode + operand validation and lookup. 
     pub fn asm(&self) -> Result<Vec<u8>, String> {
         match self {
+            Line::Org(_) => {
+                panic!("Org should not be assembled.");
+            },
             Line::None |
             Line::Label(_) => Ok(Vec::new()),
             Line::Variable(_, _) => panic!("unimplemented"),
@@ -354,6 +359,7 @@ fn tokenize(input: &str) -> Result<Vec<Line>, String> {
         let line = line.trim();
         let line = strip_comment(&line);
         let parts :Vec<_> = line.split(" ").collect();
+        let rest = parts[1..].join("");
         match parts[0] {
             "db" => {
                 let mut vals : Vec<u8> = Vec::with_capacity(parts.len());
@@ -368,11 +374,14 @@ fn tokenize(input: &str) -> Result<Vec<Line>, String> {
                 };
                 Ok(Line::Db(vals))
             }
+            "org" => {
+                let v = read_val(&rest)?;
+                Ok(Line::Org(v as usize))
+            },
             "" => Ok(Line::None),
             name => {
                 // opcode handler.
-                let arg = parts[1..].join("");
-                let operand = Operand::read(&arg)?;
+                let operand = Operand::read(&rest)?;
                 Ok(Line::Opcode(name.to_string(), operand))
             }
             _ => Err(format!("unknown token: {}", parts[0])),
@@ -396,11 +405,51 @@ pub fn assemble(input: &str) -> Result<Binary, String> {
     let input = input.to_lowercase();
     let tokens = tokenize(&input)?;
 
-    // Simple 1 pass.
-    let mut output = Vec::new();
+    // Collect runs of bytes by their starting address. Output
+    // will be large enough to span all assembled bytes.
+    let mut org = 0;
+    let mut chunks : HashMap<usize, Binary> = HashMap::new();
+    let mut current = Binary::new();
+    let mut min_org = usize::MAX;
+    let mut max_org = 0;
+    fn push (chunks: &mut HashMap<usize, Binary>, current: &mut Binary, 
+        min_org: &mut usize, max_org: &mut usize,
+        org: usize) {
+        if current.len() > 0 {
+            chunks.insert(org, current.clone());
+            current.clear();
+            // apply on push, since orgs can be used but empty and will
+            // be ignored for size calcs
+            *min_org = (*min_org).min(org);
+            *max_org = (*max_org).max(org);
+        }
+    };
+
     for line in tokens {
-        let mut bytes = line.asm()?;
-        output.append(&mut bytes);
+        match line {
+            Line::Org(next_address) => {
+                push(&mut chunks, &mut current, &mut min_org, &mut max_org, org);
+                if chunks.contains_key(&next_address) {
+                    return Err(format!("reuse of org 0x{next_address:4X} would clobber."));
+                }
+                org = next_address;
+            },
+            _ => {
+                // simply assemble
+                let mut bytes = line.asm()?;
+                current.append(&mut bytes);
+            }
+        }
+    }
+    push(&mut chunks, &mut current, &mut min_org, &mut max_org, org);
+
+    // flatten chunks
+    let mut output : Binary = Vec::new();
+    output.resize(max_org + chunks[&max_org].len() - min_org,
+        0); 
+    for (start, chunk) in chunks {
+        let dest = start - min_org;
+        output.as_mut_slice()[dest .. dest + chunk.len()].copy_from_slice(&chunk);
     }
 
     Ok(output)
@@ -670,6 +719,7 @@ mod test_asm {
     //           jmp .target"#));
     // }
 
+
     #[test]
     fn test_org_start() {
         // setting an org immediately shouldnt change the length of the
@@ -678,12 +728,38 @@ mod test_asm {
         assert_eq!(
             Ok(vec![10, 0x10]),
             assemble(r#"
-
             org $1000
             db 10
             db $10
 
             "#));
     }
+
+    #[test]
+    fn test_org_padding() {
+        // if bytes are assembled, org can be used to expand output.
+        let mut expected = Vec::new();
+        expected.resize(1000, 0);
+        assert_eq!(
+            Ok(expected),
+            assemble(r#"
+            org 0
+            db 0
+            org 999
+            db 0"#));
+
+    }
+
+    // #[test]
+    // fn test_org_start_jump() {
+    //     // But an org at the start can influence jumps
+    //     assert_eq!(
+    //         Ok(vec![0x4c, 0x00, 0x10]),
+    //         assemble(r#"
+    //         org $1000
+    //         .start:
+    //         jmp .start
+    //         "#));
+    // }
 }
 
