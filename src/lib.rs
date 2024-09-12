@@ -5,9 +5,9 @@
 // Note: This is assumed to run client side, so little effort has been
 // made to deal with DoS from inputs.
 
-// TODO: tricky remaining issues:
+// TODO: remaining issues:
 // - branches. all relative. need 2 pass
-// - variable namespace?
+// - constants
 
 use regex::Regex;
 use std::collections::HashMap;
@@ -357,7 +357,17 @@ fn tokenize(input: &str) -> Result<Vec<Line>, String> {
                     }
                 };
                 Ok(Line::Db(vals))
-            }
+            },
+            "dw" => {
+                // little endian u16
+                let mut vals : Vec<u8> = Vec::with_capacity(parts.len()*2);
+                for i in 1 .. parts.len() {
+                    let v = read_val(parts[i])?;
+                    let mut bytes = u16b(v);
+                    vals.append(&mut bytes);
+                }
+                Ok(Line::Db(vals))
+            },
             "org" => {
                 let v = read_val(&rest)?;
                 Ok(Line::Org(v as usize))
@@ -525,6 +535,18 @@ mod test_asm {
             (vec![10], "db 10"),
             (vec![16], "db $10"),
             (vec![5, 2, 10], "db 5 2 $A"),
+        ];
+        for (want, input) in cases {
+            let res = assemble(input).expect("asm failed");
+            assert_eq!(*want, res);
+        }
+    }
+
+    #[test]
+    fn test_dw() {
+        let cases = &[
+            (vec![0xad, 0xde], "dw $dead"),
+            (vec![0xfe, 0xca, 0xbe, 0xba], "dw $cafe $babe"),
         ];
         for (want, input) in cases {
             let res = assemble(input).expect("asm failed");
@@ -727,6 +749,31 @@ mod test_asm {
     //         // (BranchNE, // BNE,
     //         // (BranchEQ, // BEQ,
     // }
+    #[test]
+    fn test_branch_forward() {
+        assert_eq!(
+            Ok(vec![0x10, 3, 0xea, 0xea, 0xea]),
+            assemble(r#"
+            bpl .end
+            nop
+            nop
+            .end:
+            nop"#));
+    }
+    #[test]
+    fn test_branch_back() {
+        let offset : i8 = -127+2;
+        // TODO: double check math with another assembler.
+        assert_eq!(
+            Ok(vec![0xea, 0xea, 0x10, offset as u8, 0xea, 0xea, 0xea]),
+            assemble(r#"
+            .before:
+            nop
+            nop
+            bpl .before
+            nop
+            nop"#));
+    }
 
     #[test]
     fn test_label_assembles() {
@@ -810,8 +857,8 @@ mod test_asm {
             db 0
             org 999
             db 0"#));
-
     }
+
 
     #[test]
     fn test_org_start_jump() {
