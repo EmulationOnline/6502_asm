@@ -5,10 +5,6 @@
 // Note: This is assumed to run client side, so little effort has been
 // made to deal with DoS from inputs.
 
-// TODO: remaining issues:
-// - branches. all relative. need 2 pass
-// - constants
-
 use regex::Regex;
 use std::collections::HashMap;
 
@@ -812,14 +808,14 @@ mod test_asm {
         assert_eq!(
             Ok(vec![
                 0xb0,
-                0x10, 0xFF,
-                0x30, 0xFD,
-                0x50, 0xFB,
-                0x70, 0xF9,
-                0x90, 0xF7,
-                0xB0, 0xF5,
-                0xD0, 0xF3,
-                0xF0, 0xF1,
+                0x10, 0xFD,
+                0x30, 0xFB,
+                0x50, 0xF9,
+                0x70, 0xF7,
+                0x90, 0xF5,
+                0xB0, 0xF3,
+                0xD0, 0xF1,
+                0xF0, 0xEF,
                 0xad, 0xde,
             ]),
             assemble(r#"
@@ -849,7 +845,7 @@ mod test_asm {
     #[test]
     fn test_branch_forward() {
         assert_eq!(
-            Ok(vec![0x10, 4, 0xea, 0xea, 0xea]),
+            Ok(vec![0x10, 2, 0xea, 0xea, 0xea]),
             assemble(r#"
             bpl .end
             nop
@@ -859,9 +855,8 @@ mod test_asm {
     }
     #[test]
     fn test_branch_back() {
-        // TODO: double check by running in asm
         assert_eq!(
-            Ok(vec![0xea, 0xea, 0x10, 0xFE, 0xea, 0xea]),
+            Ok(vec![0xea, 0xea, 0x10, 0xFC, 0xea, 0xea]),
             assemble(r#"
             .before:
             nop
@@ -937,7 +932,6 @@ mod test_asm {
             org $1000
             db 10
             db $10
-
             "#));
     }
 
